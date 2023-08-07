@@ -1,0 +1,8 @@
+patent_phrases:
+    id: patent_phrases.dev.v0
+    description: Eval for gpt performance on US Patent Phrase Matching 
+    metrics: [accuracy]
+patent_phrases.dev.v0:
+    class: evals.elsuite.basic.match:Match
+    args: 
+        samples_jsonl: patent_phrases/samples.jsonl
