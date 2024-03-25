@@ -11,7 +11,8 @@ import os
 import urllib
 from collections.abc import Iterator
 from functools import partial
-from typing import Any, Sequence, Union
+from pathlib import Path
+from typing import Any, List, Optional, Sequence, Text, Union
 
 import blobfile as bf
 import lz4.frame
@@ -43,12 +44,16 @@ def zstd_open(filename: str, mode: str = "rb", openhook: Any = open) -> pyzstd.Z
     return pyzstd.ZstdFile(openhook(filename, mode), mode=mode)
 
 
-def open_by_file_pattern(filename: str, mode: str = "r", **kwargs: Any) -> Any:
+def open_by_file_pattern(filename: Union[str, Path], mode: str = "r", **kwargs: Any) -> Any:
     """Can read/write to files on gcs/local with or without gzipping. If file
     is stored on gcs, streams with blobfile. Otherwise use vanilla python open. If
     filename endswith gz, then zip/unzip contents on the fly (note that gcs paths and
     gzip are compatible)"""
     open_fn = partial(bf.BlobFile, **kwargs)
+
+    if isinstance(filename, Path):
+        filename = filename.as_posix()
+
     try:
         if filename.endswith(".gz"):
             return gzip_open(filename, openhook=open_fn, mode=mode)
@@ -58,10 +63,13 @@ def open_by_file_pattern(filename: str, mode: str = "r", **kwargs: Any) -> Any:
             return zstd_open(filename, openhook=open_fn, mode=mode)
         else:
             scheme = urllib.parse.urlparse(filename).scheme
-            if scheme == "" or scheme == "file":
+            if (not os.path.exists(filename)) and (scheme == "" or scheme == "file"):
                 return open_fn(
                     os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)), "registry", "data", filename
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "registry",
+                        "data",
+                        filename,
                     ),
                     mode=mode,
                 )
@@ -75,16 +83,17 @@ def _decode_json(line, path, line_number):
     try:
         return json.loads(line)
     except json.JSONDecodeError as e:
-        custom_error_message = f"Error parsing JSON on line {line_number}: {e.msg} at {path}:{line_number}:{e.colno}"
+        custom_error_message = (
+            f"Error parsing JSON on line {line_number}: {e.msg} at {path}:{line_number}:{e.colno}"
+        )
         logger.error(custom_error_message)
         raise ValueError(custom_error_message) from None
 
+
 def _get_jsonl_file(path):
     logger.info(f"Fetching {path}")
-    data = []
     with open_by_file_pattern(path, mode="r") as f:
         return [_decode_json(line, path, i + 1) for i, line in enumerate(f)]
-
 
 
 def _get_json_file(path):
@@ -162,28 +171,50 @@ def get_csv(path, fieldnames=None):
         return [row for row in reader]
 
 
-def _to_py_types(o: Any) -> Any:
+def _to_py_types(o: Any, exclude_keys: List[Text]) -> Any:
     if isinstance(o, dict):
-        return {k: _to_py_types(v) for k, v in o.items()}
+        return {
+            k: _to_py_types(v, exclude_keys=exclude_keys)
+            for k, v in o.items()
+            if k not in exclude_keys
+        }
+
     if isinstance(o, list):
-        return [_to_py_types(v) for v in o]
+        return [_to_py_types(v, exclude_keys=exclude_keys) for v in o]
+
+    if isinstance(o, Path):
+        return o.as_posix()
 
     if dataclasses.is_dataclass(o):
-        return _to_py_types(dataclasses.asdict(o))
+        return _to_py_types(dataclasses.asdict(o), exclude_keys=exclude_keys)
 
     # pydantic data classes
     if isinstance(o, pydantic.BaseModel):
-        return json.loads(o.json())
+        return {
+            k: _to_py_types(v, exclude_keys=exclude_keys)
+            for k, v in json.loads(o.model_dump_json()).items()
+            if k not in exclude_keys
+        }
 
     return o
 
 
 class EnhancedJSONEncoder(json.JSONEncoder):
+    def __init__(self, exclude_keys: Optional[List[Text]] = None, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.exclude_keys = exclude_keys if exclude_keys else []
+
     def default(self, o: Any) -> str:
-        return _to_py_types(o)
+        return _to_py_types(o, self.exclude_keys)
 
 
 def jsondumps(o: Any, ensure_ascii: bool = False, **kwargs: Any) -> str:
+    # The JSONEncoder class's .default method is only applied to dictionary values,
+    # not keys. In order to exclude keys from the output of this jsondumps method
+    # we need to exclude them outside the encoder.
+    if isinstance(o, dict) and "exclude_keys" in kwargs:
+        for key in kwargs["exclude_keys"]:
+            del o[key]
     return json.dumps(o, cls=EnhancedJSONEncoder, ensure_ascii=ensure_ascii, **kwargs)
 
 

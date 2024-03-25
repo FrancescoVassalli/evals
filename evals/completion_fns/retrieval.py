@@ -1,17 +1,20 @@
 """
 Extending Completion Functions with Embeddings-based retrieval from a fetched dataset
 """
+import os
 from ast import literal_eval
 from typing import Any, Optional, Union
 
 import numpy as np
-import openai
 import pandas as pd
+from openai import OpenAI
 
 from evals.api import CompletionFn, CompletionResult
 from evals.prompt.base import ChatCompletionPrompt, CompletionPrompt
 from evals.record import record_sampling
 from evals.registry import Registry
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
 def load_embeddings(embeddings_and_text_path: str):
@@ -92,9 +95,13 @@ class RetrievalCompletionFn(CompletionFn):
             kwargs: Additional arguments to pass to the completion function call method.
         """
         # Embed the prompt
-        embedded_prompt = openai.Embedding.create(
-            model=self.embedding_model, input=CompletionPrompt(prompt).to_formatted_prompt()
-        )["data"][0]["embedding"]
+        embedded_prompt = (
+            client.embeddings.create(
+                model=self.embedding_model, input=CompletionPrompt(prompt).to_formatted_prompt()
+            )
+            .data[0]
+            .embedding
+        )
 
         embs = self.embeddings_df["embedding"].to_list()
 
